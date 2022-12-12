@@ -1,0 +1,135 @@
+version: '2.1'
+
+services:
+  client:
+    image: sawfood-client
+    container_name: sawfood-client
+    build: ./food_client
+    volumes:
+      - ./food_client/public/:/usr/local/apache2/htdocs/
+    expose:
+      - 80
+    ports:
+      - '3000:80'
+    depends_on:
+      - rest-api
+
+  processor:
+    image: processor
+    container_name: processor
+    build: ./processor
+    volumes:
+      - ./processor:/processor
+      - /processor/node_modules
+    depends_on:
+      - validator
+    environment:
+      - VALIDATOR_URL=tcp://validator:4004
+
+  validator:
+    image: hyperledger/sawtooth-validator:latest
+    container_name: validator
+    expose:
+      - 4004
+    ports:
+      - '4004:4004'
+    # Start the validator with a genesis batch proposing DevMode consensus for the network.
+    entrypoint: |
+      bash -c "
+        if [ ! -f /etc/sawtooth/keys/validator.priv ]; then
+        sawadm keygen
+        sawset genesis \
+          -k /etc/sawtooth/keys/validator.priv \
+          -o config-genesis.batch && \
+        sawset proposal create \
+          -k /etc/sawtooth/keys/validator.priv \
+          sawtooth.consensus.algorithm.name=Devmode \
+          sawtooth.consensus.algorithm.version=1.2.3 \
+          -o config.batch && \
+        sawadm genesis config-genesis.batch config.batch
+        fi;
+        sawtooth-validator -vv \
+            --endpoint tcp://validator:8800 \
+            --bind component:tcp://eth0:4004 \
+            --bind network:tcp://eth0:8800 \
+            --bind consensus:tcp://eth0:5050 \
+      "
+
+  settings-tp:
+    image: hyperledger/sawtooth-settings-tp:latest
+    container_name: settings-tp
+    depends_on:
+      - validator
+    entrypoint: settings-tp -v -C tcp://validator:4004
+
+  rest-api:
+    image: hyperledger/sawtooth-rest-api:latest
+    container_name: rest-api
+    expose:
+      - 8008
+    ports:
+      - '8008:8008'
+    depends_on:
+      - validator
+    entrypoint: |
+      sawtooth-rest-api -v
+        --connect tcp://validator:4004
+        --bind rest-api:8008
+
+  shell:
+    image: hyperledger/sawtooth-shell:latest
+    container_name: shell
+    depends_on:
+      - rest-api
+    entrypoint: |
+      bash -c "
+        if [ ! -f /root/.sawtooth/keys/root.priv ]; then
+          sawtooth keygen
+        fi;
+        tail -f /dev/null
+      "
+
+  server:
+    image: sawchain-server
+    container_name: supply-server
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+      args:
+        - http_proxy
+        - https_proxy
+        - no_proxy
+    volumes:
+      - .:/sawtooth-supply-chain
+      - /sawtooth-supply-chain/server/node_modules
+    expose:
+      - 3000
+    ports:
+      - '8020:3000'
+    depends_on:
+      - validator
+      - rethink
+    environment:
+      - VALIDATOR_URL=tcp://validator:4004
+      - DB_HOST=rethink
+      - 'http_proxy=${http_proxy}'
+      - 'https_proxy=${https_proxy}'
+      - 'no_proxy=rest-api,server,eth0,validator,${no_proxy}'
+    command: |
+      bash -c "
+        if [ ! -f /root/.sawtooth/keys/root.priv ]; then
+          pwd &&
+          npm run init &&
+          npm start
+        fi;
+      "
+
+  rethink:
+    image: rethinkdb
+    container_name: rethink
+    expose:
+      - 8080
+      - 28015
+    ports:
+      - '8023:8080'
+      - '28020:28015'
